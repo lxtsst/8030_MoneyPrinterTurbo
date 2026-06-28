@@ -36,6 +36,63 @@ NO_VOICE_NAME = "no-voice"
 _NO_VOICE_ALIASES = {NO_VOICE_NAME, "none"}
 
 
+def _normalize_proxy_url(proxy_url: str | None) -> str:
+    """Normalize and guard proxy values for both requests/edge_tts callers."""
+    proxy_url = (proxy_url or "").strip()
+    if not proxy_url:
+        return ""
+    if "://" not in proxy_url:
+        return f"http://{proxy_url}"
+    return proxy_url
+
+
+def _is_chinese_text(text: str) -> bool:
+    """Return True when text contains CJK ideographs."""
+    return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+
+def _is_chinese_voice(voice_name: str) -> bool:
+    """Return True when Azure voice indicates a Chinese locale."""
+    parsed_voice = parse_voice_name(voice_name)
+    return parsed_voice.lower().startswith("zh-")
+
+
+def _pick_chinese_azure_voice(reference_voice: str = "zh-CN-XiaoyiNeural") -> str:
+    """
+    Choose a Chinese Azure voice as fallback.
+
+    Prefer explicitly configured voices in bundled voice metadata first, then
+    keep a stable deterministic fallback chain.
+    """
+    try:
+        voices = _load_azure_voices()
+    except Exception:
+        return reference_voice
+
+    preferred = [
+        "zh-CN-XiaoyiNeural",
+        "zh-CN-XiaoxiaoNeural",
+        "zh-CN-YunxiNeural",
+    ]
+    available_names = {
+        item.get("name", ""): item.get("name", "") for item in voices if item.get("name")
+    }
+
+    for candidate in preferred:
+        if candidate in available_names:
+            return candidate
+
+    for name in available_names.keys():
+        if name.startswith("zh-CN-"):
+            return name
+
+    for name in available_names.keys():
+        if name.startswith("zh-"):
+            return name
+
+    return reference_voice
+
+
 def _configure_pydub_ffmpeg(audio_segment_cls):
     configured_ffmpeg = utils.get_ffmpeg_binary()
     if configured_ffmpeg:
@@ -562,7 +619,7 @@ def populate_legacy_submaker_with_full_text(
 
 
 def create_edge_tts_communicate(
-    text: str, voice_name: str, rate_str: str
+    text: str, voice_name: str, rate_str: str, use_proxy: bool = True
 ) -> edge_tts.Communicate:
     """
     按当前已安装的 edge_tts 版本构造 Communicate 对象。
@@ -577,10 +634,50 @@ def create_edge_tts_communicate(
     `boundary`，让同一份代码同时兼容旧版和新版依赖。
     """
     communicate_kwargs = {"rate": rate_str}
+    proxy_url = ""
+    if use_proxy:
+        if isinstance(config.proxy, dict):
+            proxy_url = (
+                _normalize_proxy_url(config.proxy.get("https", ""))
+                or _normalize_proxy_url(config.proxy.get("http", ""))
+            )
+        if not proxy_url:
+            proxy_url = (
+                _normalize_proxy_url(os.getenv("MPT_HTTPS_PROXY"))
+                or _normalize_proxy_url(os.getenv("HTTPS_PROXY"))
+                or _normalize_proxy_url(os.getenv("MPT_HTTP_PROXY"))
+                or _normalize_proxy_url(os.getenv("HTTP_PROXY"))
+            )
+
+    if not use_proxy:
+        logger.info(
+            "azure_tts_v1 will skip proxy for this retry attempt "
+            f"(voice: {voice_name}, rate: {rate_str})"
+        )
+
     communicate_signature = inspect.signature(edge_tts.Communicate)
+    if proxy_url and "proxy" in communicate_signature.parameters:
+        communicate_kwargs["proxy"] = proxy_url
+    elif proxy_url and "proxies" in communicate_signature.parameters:
+        communicate_kwargs["proxies"] = {
+            "https://": proxy_url,
+            "http://": proxy_url,
+        }
 
     if "boundary" in communicate_signature.parameters:
         communicate_kwargs["boundary"] = "WordBoundary"
+
+    if proxy_url:
+        logger.info(
+            f"azure_tts_v1 will use proxy: {proxy_url} (has_proxy=True, "
+            f"signature_has_proxy={'proxy' in communicate_signature.parameters}, "
+            f"signature_has_proxies={'proxies' in communicate_signature.parameters})"
+        )
+    elif use_proxy:
+        logger.warning(
+            "azure_tts_v1 proxy is not configured; set proxy in config.toml [proxy], "
+            "or MPT_HTTP_PROXY / MPT_HTTPS_PROXY for HTTP(S) traffic."
+        )
 
     return edge_tts.Communicate(text, voice_name, **communicate_kwargs)
 
@@ -721,18 +818,59 @@ def stream_edge_tts_chunks(
 def azure_tts_v1(
     text: str, voice_name: str, voice_rate: float, voice_file: str
 ) -> Union[SubMaker, None]:
-    voice_name = parse_voice_name(voice_name)
+    requested_voice = parse_voice_name(voice_name)
+    use_voice = requested_voice
+    chinese_voice = _pick_chinese_azure_voice()
     text = text.strip()
     rate_str = convert_rate_to_percent(voice_rate)
-    for i in range(3):
+
+    # 中文脚本要使用中文 TTS；如果用户配置了英文 voice，直接改为中文兜底。
+    if _is_chinese_text(text) and not _is_chinese_voice(use_voice):
+        logger.info(
+            f"chinese script detected; force Chinese Azure voice for TTS: {chinese_voice}"
+        )
+        use_voice = chinese_voice
+
+    # Retry strategy:
+    # 1. target voice via proxy (default fast path)
+    # 2. target voice without proxy (helps when proxy is blocked)
+    # 3. keep Chinese fallback for compatibility when config still provides unsupported
+    #    voice variants later in retry chain.
+    retry_plan = [
+        (use_voice, True),
+        (use_voice, False),
+    ]
+    if _is_chinese_voice(use_voice) and chinese_voice != use_voice:
+        retry_plan.append((chinese_voice, False))
+        retry_plan.append((chinese_voice, True))
+
+    # 去重：避免同一组 voice/proxy 组合重复尝试（如配置中恰好返回默认中文 voice）。
+    deduped_plan = []
+    seen = set()
+    for voice_name_in_plan, use_proxy in retry_plan:
+        key = (voice_name_in_plan, use_proxy)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_plan.append((voice_name_in_plan, use_proxy))
+    retry_plan = deduped_plan
+    logger.info(
+        "azure_tts_v1 retry_plan: "
+        + ", ".join(f"{vn}|proxy={pu}" for vn, pu in retry_plan)
+    )
+
+    for i in range(len(retry_plan)):
+        try_voice, use_proxy = retry_plan[i]
         try:
-            logger.info(f"start, voice name: {voice_name}, try: {i + 1}")
+            logger.info(f"start, voice name: {try_voice}, try: {i + 1}")
 
             # 这里同时兼容 edge_tts 7.x 和旧版便携包里可能残留的老依赖：
             # 1. 新版支持 `boundary` + `stream_sync()`
             # 2. 旧版不支持 `boundary`，且通常只暴露异步 `stream()`
             ensure_file_path_exists(voice_file)
-            communicate = create_edge_tts_communicate(text, voice_name, rate_str)
+            communicate = create_edge_tts_communicate(
+                text, try_voice, rate_str, use_proxy=use_proxy
+            )
             sub_maker = edge_tts.SubMaker()
             timeout_seconds = get_edge_tts_timeout_seconds()
 

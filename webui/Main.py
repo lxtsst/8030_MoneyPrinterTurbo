@@ -1757,7 +1757,15 @@ if start_button:
     logger.info(utils.to_json(params))
     scroll_to_bottom()
 
-    result = tm.start(task_id=task_id, params=params)
+    try:
+        result = tm.start(task_id=task_id, params=params)
+    except Exception:
+        logger.exception("video generation raised an unexpected exception")
+        st.error(tr("Video Generation Failed"))
+        logger.error(tr("Video Generation Failed"))
+        scroll_to_bottom()
+        st.stop()
+
     if not result or "videos" not in result:
         st.error(tr("Video Generation Failed"))
         logger.error(tr("Video Generation Failed"))

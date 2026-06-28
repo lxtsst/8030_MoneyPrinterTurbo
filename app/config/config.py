@@ -11,6 +11,39 @@ _CONTAINER_CGROUP_MARKERS = ("docker", "containerd", "kubepods", "libpod", "podm
 _DOCKER_HOST_GATEWAY_NAME = "host.docker.internal"
 
 
+def _normalize_proxy_value(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if "://" not in value:
+        return f"http://{value}"
+    return value
+
+
+def _apply_env_proxy_override(proxy_cfg: dict) -> None:
+    http_proxy = _normalize_proxy_value(
+        os.getenv("MPT_HTTP_PROXY", os.getenv("HTTP_PROXY", ""))
+    )
+    https_proxy = _normalize_proxy_value(
+        os.getenv("MPT_HTTPS_PROXY", os.getenv("HTTPS_PROXY", ""))
+    )
+    no_proxy = os.getenv("MPT_NO_PROXY", os.getenv("NO_PROXY", ""))
+
+    if http_proxy:
+        proxy_cfg["http"] = http_proxy
+    if https_proxy:
+        proxy_cfg["https"] = https_proxy
+    if not https_proxy and http_proxy:
+        proxy_cfg["https"] = http_proxy
+
+    if http_proxy and not os.getenv("HTTP_PROXY"):
+        os.environ["HTTP_PROXY"] = http_proxy
+    if https_proxy and not os.getenv("HTTPS_PROXY"):
+        os.environ["HTTPS_PROXY"] = https_proxy
+    if no_proxy and not os.getenv("NO_PROXY"):
+        os.environ["NO_PROXY"] = no_proxy
+
+
 def is_running_in_container(
     dockerenv_path: str = "/.dockerenv",
     containerenv_path: str = "/run/.containerenv",
@@ -162,6 +195,8 @@ _cfg = load_config()
 app = _cfg.get("app", {})
 whisper = _cfg.get("whisper", {})
 proxy = _cfg.get("proxy", {})
+if isinstance(proxy, dict):
+    _apply_env_proxy_override(proxy)
 azure = _cfg.get("azure", {})
 siliconflow = _cfg.get("siliconflow", {})
 elevenlabs = _cfg.get("elevenlabs", {})

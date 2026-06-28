@@ -1,6 +1,18 @@
 x-common-volumes: &common-volumes
-  - ./config.toml:/MoneyPrinterTurbo/config.toml
-  - ./storage:/MoneyPrinterTurbo/storage
+  - ./:/MoneyPrinterTurbo
+  - ./scripts/render-mpt-config.py:/MoneyPrinterTurbo/scripts/render-mpt-config.py:ro
+  - ./scripts/render-mpt-config.sh:/MoneyPrinterTurbo/scripts/render-mpt-config.sh:ro
+
+x-common-env: &common-env
+  MPT_LLM_PROVIDER: ${MPT_LLM_PROVIDER:-}
+  MPT_DEEPSEEK_API_KEY: ${MPT_DEEPSEEK_API_KEY:-}
+  MPT_DEEPSEEK_BASE_URL: ${MPT_DEEPSEEK_BASE_URL:-}
+  MPT_DEEPSEEK_MODEL_NAME: ${MPT_DEEPSEEK_MODEL_NAME:-}
+  MPT_WEBUI_BASE_PATH: ${MPT_WEBUI_BASE_PATH:-}
+  MPT_API_ROOT_PATH: ${MPT_API_ROOT_PATH:-}
+  HTTP_PROXY: ${MPT_HTTP_PROXY:-}
+  HTTPS_PROXY: ${MPT_HTTPS_PROXY:-}
+  NO_PROXY: ${MPT_NO_PROXY:-127.0.0.1,localhost}
 
 services:
   webui:
@@ -8,6 +20,8 @@ services:
     container_name: "moneyprinterturbo-webui"
     ports:
       - "127.0.0.1:8501:8501"
+    environment: *common-env
+    entrypoint: ["/bin/bash", "/MoneyPrinterTurbo/scripts/render-mpt-config.sh"]
     command: [ "streamlit", "run", "./webui/Main.py", "--server.address=0.0.0.0", "--server.port=8501", "--browser.serverAddress=127.0.0.1", "--server.enableCORS=True", "--browser.gatherUsageStats=False", "--server.showEmailPrompt=False" ]
     volumes: *common-volumes
     restart: always
@@ -15,7 +29,9 @@ services:
     image: ghcr.io/harry0703/moneyprinterturbo:latest
     container_name: "moneyprinterturbo-api"
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8080"
+    environment: *common-env
+    entrypoint: ["/bin/bash", "/MoneyPrinterTurbo/scripts/render-mpt-config.sh"]
     command: [ "python3", "main.py" ]
     volumes: *common-volumes
     restart: always

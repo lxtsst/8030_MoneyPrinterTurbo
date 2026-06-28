@@ -460,7 +460,7 @@ def close_clip(clip):
             
     except Exception as e:
         logger.error(f"failed to close clip: {str(e)}")
-    
+
     del clip
     gc.collect()
 
@@ -567,11 +567,23 @@ def combine_videos(
     processed_clips = []
     subclipped_items = []
     video_duration = 0
+    skipped_video_paths = []
     for video_path in video_paths:
-        clip = _open_video_clip_quietly(video_path)
-        clip_duration = clip.duration
-        clip_w, clip_h = clip.size
-        close_clip(clip)
+        clip = None
+        try:
+            clip = _open_video_clip_quietly(video_path)
+            clip_duration = clip.duration
+            clip_w, clip_h = clip.size
+        except Exception as e:
+            skipped_video_paths.append((video_path, str(e)))
+            logger.error(
+                f"skip invalid source video, failed to inspect metadata: "
+                f"{video_path}, error: {str(e)}"
+            )
+            continue
+        finally:
+            if clip is not None:
+                close_clip(clip)
         
         start_time = 0
 
@@ -601,9 +613,18 @@ def combine_videos(
         subclipped_items=subclipped_items,
         concat_mode=video_concat_mode,
     )
+    if not subclipped_items:
+        if skipped_video_paths:
+            skipped_files = ", ".join(
+                os.path.basename(item) for item, _ in skipped_video_paths
+            )
+            logger.error(f"all source videos are invalid, skipped files: {skipped_files}")
+        else:
+            logger.error("no valid source videos found for combination")
+        raise RuntimeError("no valid source clips after filtering invalid source videos")
         
     logger.debug(f"total subclipped items: {len(subclipped_items)}")
-    
+
     # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
     for i, subclipped_item in enumerate(subclipped_items):
         if video_duration >= required_video_duration:
@@ -693,7 +714,19 @@ def combine_videos(
             video_duration += clip_duration_saved
             
         except Exception as e:
-            logger.error(f"failed to process clip: {str(e)}")
+            logger.error(
+                f"skip clip from source {subclipped_item.source_file_path}, "
+                f"failed during processing: {str(e)}"
+            )
+
+    if not processed_clips:
+        if skipped_video_paths:
+            skipped_files = ", ".join(
+                os.path.basename(item) for item, _ in skipped_video_paths
+            )
+            logger.error(f"all source videos were skipped, skipped files: {skipped_files}")
+        logger.error("no valid video segments were produced after processing")
+        raise RuntimeError("no valid video segments available for concatenation")
     
     # loop processed clips until the video duration covers the audio duration and the small safety margin.
     if video_duration < required_video_duration:

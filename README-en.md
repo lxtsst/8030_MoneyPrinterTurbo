@@ -201,6 +201,16 @@ git clone https://github.com/harry0703/MoneyPrinterTurbo.git
 - Follow the instructions in the `config.toml` file to configure `pexels_api_keys` and `llm_provider`, and according to
   the llm_provider's service provider, set up the corresponding API Key
 - To use the recommended multi-model provider, you can set `llm_provider` to `aihubmix` and enter the corresponding API key.
+- If you plan to run with DeepSeek in Docker, use `.env` variables instead:
+  `cp .env.example .env` and fill `MPT_LLM_PROVIDER`, `MPT_DEEPSEEK_API_KEY`, etc.
+  If you will publish under a subpath (for example, `https://video.example.invalid/mpt/`), add:
+  ```dotenv
+  MPT_WEBUI_BASE_PATH=/mpt
+  MPT_API_ROOT_PATH=/mpt
+  ```
+- The release compose file passes these variables automatically, and `scripts/render-mpt-config.sh` applies them to `config.toml` on container startup.
+- Deploy to a server by passing the target explicitly:
+  `scripts/deploy_remote_mpt.sh <user>@<host> <remote-dir> .env`
 
 ### Docker Deployment 🐳
 
@@ -228,6 +238,28 @@ Open your browser and visit http://127.0.0.1:8501
 #### ③ Access the API Interface
 
 Open your browser and visit http://127.0.0.1:8080/docs or http://127.0.0.1:8080/redoc
+
+#### ④ Nginx Reverse Proxy with `/mpt`
+
+If a public domain is already mapped on the server, add:
+
+```nginx
+location /mpt/api/ {
+    proxy_pass http://127.0.0.1:8080/mpt/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location /mpt/ {
+    proxy_pass http://127.0.0.1:8501/mpt/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
 
 ### Manual Deployment 📦
 

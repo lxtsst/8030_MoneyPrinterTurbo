@@ -200,6 +200,16 @@ git clone https://github.com/harry0703/MoneyPrinterTurbo.git
 - 按照 `config.toml` 文件中的说明，配置好 `pexels_api_keys` 和 `llm_provider`，并根据 llm_provider 对应的服务商，配置相关的
   API Key
 - 如果希望使用推荐的大模型平台，也可以将 `llm_provider` 设置为 `aihubmix`，并填写对应的 API Key。
+- 如果你主要通过 DeepSeek 运行，可使用 `.env` 文件注入配置：
+  `cp .env.example .env` 后填入 `MPT_LLM_PROVIDER`、`MPT_DEEPSEEK_API_KEY` 等变量。
+  如果你要用子路径发布（例如 `https://video.example.invalid/mpt/`），可再加：
+  ```dotenv
+  MPT_WEBUI_BASE_PATH=/mpt
+  MPT_API_ROOT_PATH=/mpt
+  ```
+- 推荐在启动前执行：`docker compose -f docker-compose.release.yml up -d`（或 `docker compose -f docker-compose.release.yml down && up -d`）。
+- 容器启动时会自动执行注入脚本：`scripts/render-mpt-config.sh`，把 `.env` 中的 DeepSeek 配置写入到 `config.toml`。
+- 服务器部署需显式传入目标主机和目录：`scripts/deploy_remote_mpt.sh <user>@<host> <remote-dir> .env`
 
 ### Docker部署 🐳
 
@@ -228,6 +238,28 @@ docker compose -f docker-compose.release.yml up
 #### ③ 访问API文档
 
 打开浏览器，访问 http://127.0.0.1:8080/docs 或者 http://127.0.0.1:8080/redoc
+
+#### ④ Nginx 反代到 `/mpt`
+
+如果服务器已有公开域名，可新增如下 location（按你的端口与证书微调）：
+
+```nginx
+location /mpt/api/ {
+    proxy_pass http://127.0.0.1:8080/mpt/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location /mpt/ {
+    proxy_pass http://127.0.0.1:8501/mpt/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
 
 ### 手动部署 📦
 
